@@ -1,8 +1,15 @@
 (() => {
-  let BAR_COUNT = 28;
-  const PEAK_COOLDOWN_MS = 90;   // min time between smoke bursts per bar
+  const PEAK_COOLDOWN_MS = 90;   // min time between smoke bursts per chimney
   const SMOKE_LIFE_MS = 9000;    // how long a smoke particle lingers before fully fading
   const TONE_FREQ_HZ = 440;      // A4 — smoke turns gold while this pitch is present
+
+  // Three fixed frequency bands, left to right: bass, mids, treble. Each one
+  // drives its own chimney, so the bar itself doubles as an EQ readout.
+  const BAND_DEFS = [
+    { key: 'bass', label: 'Graves', loHz: 20, hiHz: 250 },
+    { key: 'mid', label: 'Medios', loHz: 250, hiHz: 4000 },
+    { key: 'treble', label: 'Brillos', loHz: 4000, hiHz: 16000 },
+  ];
 
   const stage = document.getElementById('stage');
   const chromaBg = document.getElementById('chromaBg');
@@ -19,37 +26,23 @@
   const clearSmokeBtn = document.getElementById('clearSmoke');
   const thresholdInput = document.getElementById('threshold');
   const thresholdValueLabel = document.getElementById('thresholdValue');
-  const barCountInput = document.getElementById('barCount');
-  const barCountValueLabel = document.getElementById('barCountValue');
   const toggleControlsBtn = document.getElementById('toggleControls');
   const controlsPanel = document.getElementById('controlsPanel');
 
   const DEFAULT_BG = '#00ff47';
   const DEFAULT_BAR = '#ff2fd0';
 
-  // ---------- Bars ----------
-  let bars = [];
-  function buildBars(count) {
-    BAR_COUNT = count;
-    barsContainer.innerHTML = '';
-    bars = [];
-    for (let i = 0; i < BAR_COUNT; i++) {
-      const el = document.createElement('div');
-      el.className = 'bar';
-      barsContainer.appendChild(el);
-      bars.push({
-        el,
-        lastPeakAt: 0,
-        aboveThreshold: false,
-      });
-    }
-  }
-  buildBars(BAR_COUNT);
-
-  barCountInput.addEventListener('input', () => {
-    const count = parseInt(barCountInput.value, 10);
-    barCountValueLabel.textContent = count;
-    buildBars(count);
+  // ---------- Bars (one chimney per frequency band) ----------
+  const bars = BAND_DEFS.map((band) => {
+    const el = document.createElement('div');
+    el.className = 'bar';
+    el.dataset.band = band.key;
+    const label = document.createElement('span');
+    label.className = 'bar-label';
+    label.textContent = band.label;
+    el.appendChild(label);
+    barsContainer.appendChild(el);
+    return { el, loHz: band.loHz, hiHz: band.hiHz, lastPeakAt: 0, aboveThreshold: false };
   });
 
   // ---------- Canvas sizing ----------
@@ -66,23 +59,27 @@
   resizeCanvas();
 
   // ---------- Particles (smoke) ----------
+  // Each particle spirals around a "guide" point that rises from its own
+  // chimney and drifts toward screen center over its lifetime, so smoke from
+  // all three bars converges and overlaps in the middle into one abstract
+  // shape instead of three separate columns.
   let particles = [];
 
-  function spawnSmoke(x, y, intensity) {
-    // intensity ~ 0..1, more noise -> more particles per burst
+  function spawnSmoke(x, y, intensity, centerX) {
     const count = 1 + Math.round(intensity * 4);
     for (let i = 0; i < count; i++) {
       particles.push({
-        x: x + (Math.random() - 0.5) * 10,
-        y,
-        vx: (Math.random() - 0.5) * 0.25,
-        vy: -(0.35 + Math.random() * 0.5) * (0.6 + intensity),
-        radius: 6 + Math.random() * 8 * (0.5 + intensity),
-        maxRadius: 22 + Math.random() * 30 * (0.5 + intensity),
+        originX: x + (Math.random() - 0.5) * 14,
+        originY: y,
+        centerX: centerX + (Math.random() - 0.5) * 60,
         born: performance.now(),
         life: SMOKE_LIFE_MS * (0.7 + Math.random() * 0.6),
-        drift: (Math.random() - 0.5) * 0.02,
-        angle: Math.random() * Math.PI * 2,
+        riseSpeed: (0.018 + Math.random() * 0.02) * (0.6 + intensity), // px/ms
+        spiralAngle: Math.random() * Math.PI * 2,
+        spiralSpeed: (0.0008 + Math.random() * 0.0014) * (Math.random() < 0.5 ? 1 : -1), // rad/ms
+        spiralRadiusMax: 16 + Math.random() * 30 * (0.5 + intensity),
+        radius: 5 + Math.random() * 6 * (0.5 + intensity),
+        maxRadius: 16 + Math.random() * 24 * (0.5 + intensity),
       });
     }
     // safety cap so very long sessions don't blow memory
@@ -105,21 +102,33 @@
 
     for (const p of particles) {
       const t = (now - p.born) / p.life; // 0..1
+      const elapsed = now - p.born;
       const ease = 1 - Math.pow(1 - t, 2);
-      p.x += p.vx + Math.sin(p.angle + now * 0.001) * p.drift;
-      p.y += p.vy * (1 - t * 0.5);
-      p.angle += 0.01;
+
+      // Guide point: rises straight up from the chimney, pulled toward the
+      // shared center with an ease-in curve so convergence happens late.
+      const attraction = t * t;
+      const guideX = p.originX + (p.centerX - p.originX) * attraction;
+      const guideY = p.originY - p.riseSpeed * elapsed;
+
+      // Spiral radius grows then shrinks back to ~0 (sin envelope), so each
+      // particle winds outward and then coils back in as it vanishes.
+      const spiralR = p.spiralRadiusMax * Math.sin(Math.PI * t);
+      const angle = p.spiralAngle + p.spiralSpeed * elapsed;
+      const x = guideX + Math.cos(angle) * spiralR;
+      const y = guideY + Math.sin(angle) * spiralR * 0.6;
+
       const radius = p.radius + (p.maxRadius - p.radius) * ease;
       const opacity = (1 - t) * 0.5;
 
-      const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, radius);
+      const grad = ctx.createRadialGradient(x, y, 0, x, y, radius);
       grad.addColorStop(0, `rgba(${core},${opacity})`);
       grad.addColorStop(0.5, `rgba(${mid},${opacity * 0.6})`);
       grad.addColorStop(1, `rgba(${mid},0)`);
 
       ctx.fillStyle = grad;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
       ctx.fill();
     }
   }
@@ -182,8 +191,9 @@
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       analyser = audioCtx.createAnalyser();
-      // Larger fftSize gives finer frequency resolution (needed to isolate
-      // 440Hz specifically) without noticeably increasing CPU cost.
+      // Larger fftSize gives finer frequency resolution — needed both to
+      // isolate 440Hz specifically and to separate bass/mid/treble bands
+      // cleanly — without noticeably increasing CPU cost.
       analyser.fftSize = 4096;
       analyser.smoothingTimeConstant = 0.75;
       analyser.minDecibels = -90;
@@ -217,7 +227,7 @@
     micBtn.textContent = '🎤 Activar micrófono';
     micBtn.classList.remove('on');
     statusEl.textContent = 'Micrófono detenido.';
-    bars.forEach(b => (b.el.style.height = '6px'));
+    bars.forEach(b => (b.el.style.height = '3%'));
   }
 
   micBtn.addEventListener('click', () => {
@@ -235,19 +245,24 @@
     const maxDb = analyser.maxDecibels;
     const dbRange = maxDb - minDb;
     const binCount = dataArray.length;
-    const binsPerBar = Math.floor(binCount / BAR_COUNT) || 1;
+    const binHz = audioCtx.sampleRate / analyser.fftSize;
     const now = performance.now();
     const stageRect = stage.getBoundingClientRect();
+    const centerX = stageRect.width / 2;
 
-    for (let i = 0; i < BAR_COUNT; i++) {
-      const start = i * binsPerBar;
+    for (const bar of bars) {
+      const loBin = Math.max(0, Math.floor(bar.loHz / binHz));
+      const hiBin = Math.min(binCount - 1, Math.ceil(bar.hiHz / binHz));
       let sum = 0;
-      for (let j = 0; j < binsPerBar; j++) sum += dataArray[start + j] || 0;
-      const avg = sum / binsPerBar; // 0..255
+      let n = 0;
+      for (let k = loBin; k <= hiBin; k++) {
+        sum += dataArray[k];
+        n++;
+      }
+      const avg = n ? sum / n : 0; // 0..255
 
-      const bar = bars[i];
       const boosted = Math.min(255, avg * sensitivity);
-      const heightPct = Math.max(2, (boosted / 255) * 100);
+      const heightPct = Math.max(3, (boosted / 255) * 100);
       bar.el.style.height = heightPct + '%';
 
       // Convert the raw amplitude to an approximate dB value using the
@@ -265,15 +280,14 @@
         const x = barRect.left - stageRect.left + barRect.width / 2;
         const y = barRect.top - stageRect.top;
         const intensity = Math.min(1, Math.max(0, (dbValue - thresholdDb) / (maxDb - thresholdDb || 1)));
-        spawnSmoke(x, y, intensity);
+        spawnSmoke(x, y, intensity, centerX);
       }
       bar.aboveThreshold = isAbove;
       bar.el.classList.toggle('peak', isAbove);
     }
 
     // Isolate the bin(s) nearest 440Hz to detect that specific pitch,
-    // independent of the per-bar bucket it happens to fall into.
-    const binHz = audioCtx.sampleRate / analyser.fftSize;
+    // independent of which band bucket it falls into.
     const targetBin = Math.round(TONE_FREQ_HZ / binHz);
     let toneSum = 0;
     let toneBins = 0;
