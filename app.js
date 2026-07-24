@@ -1,7 +1,8 @@
 (() => {
-  const BAR_COUNT = 28;
+  let BAR_COUNT = 28;
   const PEAK_COOLDOWN_MS = 90;   // min time between smoke bursts per bar
   const SMOKE_LIFE_MS = 9000;    // how long a smoke particle lingers before fully fading
+  const TONE_FREQ_HZ = 440;      // A4 — smoke turns gold while this pitch is present
 
   const stage = document.getElementById('stage');
   const chromaBg = document.getElementById('chromaBg');
@@ -18,6 +19,8 @@
   const clearSmokeBtn = document.getElementById('clearSmoke');
   const thresholdInput = document.getElementById('threshold');
   const thresholdValueLabel = document.getElementById('thresholdValue');
+  const barCountInput = document.getElementById('barCount');
+  const barCountValueLabel = document.getElementById('barCountValue');
   const toggleControlsBtn = document.getElementById('toggleControls');
   const controlsPanel = document.getElementById('controlsPanel');
 
@@ -25,17 +28,29 @@
   const DEFAULT_BAR = '#ff2fd0';
 
   // ---------- Bars ----------
-  const bars = [];
-  for (let i = 0; i < BAR_COUNT; i++) {
-    const el = document.createElement('div');
-    el.className = 'bar';
-    barsContainer.appendChild(el);
-    bars.push({
-      el,
-      lastPeakAt: 0,
-      aboveThreshold: false,
-    });
+  let bars = [];
+  function buildBars(count) {
+    BAR_COUNT = count;
+    barsContainer.innerHTML = '';
+    bars = [];
+    for (let i = 0; i < BAR_COUNT; i++) {
+      const el = document.createElement('div');
+      el.className = 'bar';
+      barsContainer.appendChild(el);
+      bars.push({
+        el,
+        lastPeakAt: 0,
+        aboveThreshold: false,
+      });
+    }
   }
+  buildBars(BAR_COUNT);
+
+  barCountInput.addEventListener('input', () => {
+    const count = parseInt(barCountInput.value, 10);
+    barCountValueLabel.textContent = count;
+    buildBars(count);
+  });
 
   // ---------- Canvas sizing ----------
   function resizeCanvas() {
@@ -76,12 +91,17 @@
     }
   }
 
-  function drawSmoke(now) {
+  function drawSmoke(now, tone440Active) {
     const rect = stage.getBoundingClientRect();
     ctx.clearRect(0, 0, rect.width, rect.height);
     ctx.globalCompositeOperation = 'source-over';
 
     particles = particles.filter(p => (now - p.born) < p.life);
+
+    // While the 440Hz tone (A4) is present, every particle on screen — new
+    // or already floating — renders in gold instead of the usual grey smoke.
+    const core = tone440Active ? '255,214,64' : '235,235,240';
+    const mid = tone440Active ? '255,178,20' : '200,200,210';
 
     for (const p of particles) {
       const t = (now - p.born) / p.life; // 0..1
@@ -93,9 +113,9 @@
       const opacity = (1 - t) * 0.5;
 
       const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, radius);
-      grad.addColorStop(0, `rgba(235,235,240,${opacity})`);
-      grad.addColorStop(0.5, `rgba(200,200,210,${opacity * 0.6})`);
-      grad.addColorStop(1, `rgba(200,200,210,0)`);
+      grad.addColorStop(0, `rgba(${core},${opacity})`);
+      grad.addColorStop(0.5, `rgba(${mid},${opacity * 0.6})`);
+      grad.addColorStop(1, `rgba(${mid},0)`);
 
       ctx.fillStyle = grad;
       ctx.beginPath();
@@ -162,7 +182,9 @@
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 256;
+      // Larger fftSize gives finer frequency resolution (needed to isolate
+      // 440Hz specifically) without noticeably increasing CPU cost.
+      analyser.fftSize = 4096;
       analyser.smoothingTimeConstant = 0.75;
       analyser.minDecibels = -90;
       analyser.maxDecibels = -10;
@@ -249,14 +271,30 @@
       bar.el.classList.toggle('peak', isAbove);
     }
 
-    drawSmoke(now);
+    // Isolate the bin(s) nearest 440Hz to detect that specific pitch,
+    // independent of the per-bar bucket it happens to fall into.
+    const binHz = audioCtx.sampleRate / analyser.fftSize;
+    const targetBin = Math.round(TONE_FREQ_HZ / binHz);
+    let toneSum = 0;
+    let toneBins = 0;
+    for (let k = targetBin - 1; k <= targetBin + 1; k++) {
+      if (k >= 0 && k < binCount) {
+        toneSum += dataArray[k];
+        toneBins++;
+      }
+    }
+    const toneAvg = toneBins ? toneSum / toneBins : 0;
+    const toneDb = minDb + (toneAvg / 255) * dbRange;
+    const tone440Active = toneDb >= thresholdDb;
+
+    drawSmoke(now, tone440Active);
     requestAnimationFrame(loop);
   }
 
   // Keep drawing smoke fade-out even when mic is stopped, so particles finish gracefully.
   function idleDraw() {
     if (!running) {
-      drawSmoke(performance.now());
+      drawSmoke(performance.now(), false);
     }
     requestAnimationFrame(idleDraw);
   }
