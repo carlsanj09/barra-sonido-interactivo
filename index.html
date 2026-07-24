@@ -14,14 +14,13 @@
 
     <div class="bars" id="barsContainer"></div>
 
-    <div class="hud">
-      <button id="micBtn" class="hud-btn primary">🎤 Activar micrófono</button>
-      <div class="hud-status" id="status">Esperando permiso de micrófono…</div>
-    </div>
-
     <button id="toggleControls" class="toggle-controls-btn" title="Ocultar/mostrar controles">⚙</button>
 
     <div class="controls" id="controlsPanel">
+      <div class="control-group">
+        <button id="micBtn" class="mini-btn wide primary">🎤 Activar micrófono</button>
+      </div>
+      <div class="hud-status" id="status">Esperando permiso de micrófono…</div>
       <div class="control-group">
         <label for="bgColor">Fondo (chroma)</label>
         <input type="color" id="bgColor" value="#00ff47" />
