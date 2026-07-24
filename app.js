@@ -1,9 +1,18 @@
 (() => {
   // ---------- Tunable constants ----------
-  const TOLERANCE_CENTS = 50;     // full scale of the ruler, ±50 cents (half a semitone)
-  const IN_TUNE_CENTS = 10;       // within this many cents counts as "hit" -> bar changes color
-  const RMS_GATE_BASE = 0.02;     // base minimum input level to attempt pitch detection
-  const CLARITY_GATE = 0.5;       // minimum autocorrelation clarity to trust a pitch reading
+  const TOLERANCE_CENTS = 100;    // full scale of the ruler, ±100 cents (a whole semitone) —
+                                    // wide and forgiving so beginners can see their range clearly
+  const IN_TUNE_CENTS = 25;       // within this many cents counts as "hit" -> bar changes color
+  const RMS_GATE_BASE = 0.012;    // base minimum input level to attempt pitch detection —
+                                    // lower than a synthetic-tone test needs, since real voices
+                                    // are quieter/breathier than a clean sine
+  const CLARITY_GATE = 0.35;      // minimum autocorrelation clarity to trust a pitch reading —
+                                    // real voices are less "pure" than a test tone (harmonics),
+                                    // so this is relaxed from a stricter default
+  const CENTS_SMOOTHING = 0.12;   // low-pass factor for the displayed pitch — small value means
+                                    // slow, smooth bar movement instead of a jittery live needle
+  const READING_GRACE_FRAMES = 6; // consecutive missed frames tolerated before treating the
+                                    // reading as truly lost, so brief dropouts don't flicker
   const MIN_FREQ = 70;            // lowest voice frequency we try to track (Hz)
   const MAX_FREQ = 1200;          // highest voice frequency we try to track (Hz)
   const RESULT_FLASH_MS = 2500;   // how long the success/fail full-screen flash stays up
@@ -100,6 +109,7 @@
   let holdStreakStart = null;
   let smoothedCents = 0;
   let hasReading = false;
+  let missedFrames = 0;
 
   function resetTest() {
     testState = 'idle';
@@ -220,7 +230,7 @@
     ctx.font = '600 12px "Segoe UI", sans-serif';
     ctx.textBaseline = 'middle';
     ctx.lineWidth = 2;
-    for (let v = -TOLERANCE_CENTS; v <= TOLERANCE_CENTS; v += 10) {
+    for (let v = -TOLERANCE_CENTS; v <= TOLERANCE_CENTS; v += 20) {
       const y = centerY - (v / TOLERANCE_CENTS) * rangeSpan;
       const tickLen = v === 0 ? 22 : 12;
       ctx.beginPath();
@@ -385,6 +395,7 @@
     micBtn.classList.remove('on');
     statusEl.textContent = 'Micrófono detenido.';
     hasReading = false;
+    missedFrames = 0;
     resetTest();
   }
 
@@ -403,11 +414,20 @@
 
     const pitch = detectPitch(timeBuf, audioCtx.sampleRate, rmsGate);
     if (pitch) {
+      missedFrames = 0;
       const cents = 1200 * Math.log2(pitch / targetFreq);
-      smoothedCents = hasReading ? smoothedCents + (cents - smoothedCents) * 0.35 : cents;
+      // Slow, low-pass-filtered follow instead of jumping straight to the
+      // latest reading — makes the bar read as a steady needle showing the
+      // voice's pitch range rather than a twitchy live signal.
+      smoothedCents = hasReading ? smoothedCents + (cents - smoothedCents) * CENTS_SMOOTHING : cents;
       hasReading = true;
     } else {
-      hasReading = false;
+      missedFrames++;
+      // Tolerate a handful of missed frames (brief dropouts/noise) before
+      // declaring the signal lost, so the readout doesn't flicker.
+      if (missedFrames > READING_GRACE_FRAMES) {
+        hasReading = false;
+      }
     }
 
     const inTune = hasReading && Math.abs(smoothedCents) <= IN_TUNE_CENTS;
