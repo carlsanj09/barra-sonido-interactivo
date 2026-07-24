@@ -204,3 +204,33 @@ body {
   background: var(--panel-bg);
   border-radius: 12px;
 }
+
+.toggle-controls-btn {
+  position: absolute;
+  bottom: 10%;
+  right: 4%;
+  z-index: 4;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--panel-border);
+  background: var(--panel-bg);
+  color: #fff;
+  font-size: 15px;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.toggle-controls-btn.active {
+  background: color-mix(in srgb, var(--bar-color) 40%, rgba(10, 10, 14, 0.55));
+  transform: rotate(90deg);
+}
+
+.controls.hidden {
+  display: none;
+}
+
+.controls {
+  transition: opacity 0.2s ease;
+}

@@ -1,6 +1,5 @@
 (() => {
   const BAR_COUNT = 28;
-  const PEAK_RATIO = 0.82;       // % of bar's own recent max to count as "peak"
   const PEAK_COOLDOWN_MS = 90;   // min time between smoke bursts per bar
   const SMOKE_LIFE_MS = 9000;    // how long a smoke particle lingers before fully fading
 
@@ -17,6 +16,10 @@
   const barResetBtn = document.getElementById('barReset');
   const sensitivityInput = document.getElementById('sensitivity');
   const clearSmokeBtn = document.getElementById('clearSmoke');
+  const thresholdInput = document.getElementById('threshold');
+  const thresholdValueLabel = document.getElementById('thresholdValue');
+  const toggleControlsBtn = document.getElementById('toggleControls');
+  const controlsPanel = document.getElementById('controlsPanel');
 
   const DEFAULT_BG = '#00ff47';
   const DEFAULT_BAR = '#ff2fd0';
@@ -29,8 +32,8 @@
     barsContainer.appendChild(el);
     bars.push({
       el,
-      runningMax: 40,
       lastPeakAt: 0,
+      aboveThreshold: false,
     });
   }
 
@@ -105,6 +108,17 @@
     particles = [];
   });
 
+  // ---------- Controls visibility toggle ----------
+  toggleControlsBtn.addEventListener('click', () => {
+    const hidden = controlsPanel.classList.toggle('hidden');
+    toggleControlsBtn.classList.toggle('active', !hidden);
+  });
+
+  // ---------- Threshold display ----------
+  thresholdInput.addEventListener('input', () => {
+    thresholdValueLabel.textContent = thresholdInput.value;
+  });
+
   // ---------- Colors ----------
   function applyBg(hex) {
     chromaBg.style.setProperty('--chroma', hex);
@@ -138,6 +152,8 @@
       analyser = audioCtx.createAnalyser();
       analyser.fftSize = 256;
       analyser.smoothingTimeConstant = 0.75;
+      analyser.minDecibels = -90;
+      analyser.maxDecibels = -10;
       dataArray = new Uint8Array(analyser.frequencyBinCount);
       source = audioCtx.createMediaStreamSource(stream);
       source.connect(analyser);
@@ -173,39 +189,45 @@
     analyser.getByteFrequencyData(dataArray);
 
     const sensitivity = parseFloat(sensitivityInput.value);
+    const thresholdDb = parseFloat(thresholdInput.value);
+    const minDb = analyser.minDecibels;
+    const maxDb = analyser.maxDecibels;
+    const dbRange = maxDb - minDb;
     const binCount = dataArray.length;
     const binsPerBar = Math.floor(binCount / BAR_COUNT) || 1;
     const now = performance.now();
     const stageRect = stage.getBoundingClientRect();
-
-    let overallSum = 0;
 
     for (let i = 0; i < BAR_COUNT; i++) {
       const start = i * binsPerBar;
       let sum = 0;
       for (let j = 0; j < binsPerBar; j++) sum += dataArray[start + j] || 0;
       const avg = sum / binsPerBar; // 0..255
-      overallSum += avg;
 
       const bar = bars[i];
       const boosted = Math.min(255, avg * sensitivity);
       const heightPct = Math.max(2, (boosted / 255) * 100);
       bar.el.style.height = heightPct + '%';
 
-      bar.runningMax = Math.max(boosted, bar.runningMax * 0.985);
+      // Convert the raw amplitude to an approximate dB value using the
+      // analyser's own scale, so the threshold the user picks means
+      // something real (matches AnalyserNode.min/maxDecibels).
+      const dbValue = minDb + (avg / 255) * dbRange;
+      const isAbove = dbValue >= thresholdDb;
 
-      const isPeak = boosted > bar.runningMax * PEAK_RATIO && boosted > 60;
-      if (isPeak && now - bar.lastPeakAt > PEAK_COOLDOWN_MS) {
+      // Smoke fires on the rising edge only (silence -> above threshold),
+      // so bursts land on each transient/beat instead of a sustained cloud
+      // while the sound stays loud — this is what keeps it "rhythmic".
+      if (isAbove && !bar.aboveThreshold && now - bar.lastPeakAt > PEAK_COOLDOWN_MS) {
         bar.lastPeakAt = now;
-        bar.el.classList.add('peak');
         const barRect = bar.el.getBoundingClientRect();
         const x = barRect.left - stageRect.left + barRect.width / 2;
         const y = barRect.top - stageRect.top;
-        const intensity = Math.min(1, boosted / 255);
+        const intensity = Math.min(1, Math.max(0, (dbValue - thresholdDb) / (maxDb - thresholdDb || 1)));
         spawnSmoke(x, y, intensity);
-      } else {
-        bar.el.classList.remove('peak');
       }
+      bar.aboveThreshold = isAbove;
+      bar.el.classList.toggle('peak', isAbove);
     }
 
     drawSmoke(now);

@@ -19,7 +19,9 @@
       <div class="hud-status" id="status">Esperando permiso de micrófono…</div>
     </div>
 
-    <div class="controls">
+    <button id="toggleControls" class="toggle-controls-btn" title="Ocultar/mostrar controles">⚙</button>
+
+    <div class="controls" id="controlsPanel">
       <div class="control-group">
         <label for="bgColor">Fondo (chroma)</label>
         <input type="color" id="bgColor" value="#00ff47" />
@@ -33,6 +35,10 @@
       <div class="control-group slider-group">
         <label for="sensitivity">Sensibilidad</label>
         <input type="range" id="sensitivity" min="0.5" max="2.5" step="0.1" value="1.2" />
+      </div>
+      <div class="control-group slider-group">
+        <label for="threshold">Umbral humo (dB): <span id="thresholdValue">-45</span></label>
+        <input type="range" id="threshold" min="-90" max="-20" step="1" value="-45" />
       </div>
       <button id="clearSmoke" class="mini-btn wide">Limpiar humo</button>
     </div>
