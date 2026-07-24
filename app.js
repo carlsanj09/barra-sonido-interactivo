@@ -15,10 +15,7 @@
                                     // reading as truly lost, so brief dropouts don't flicker
   const MIN_FREQ = 70;            // lowest voice frequency we try to track (Hz)
   const MAX_FREQ = 1200;          // highest voice frequency we try to track (Hz)
-  const RESULT_FLASH_MS = 2500;   // how long the success/fail full-screen flash stays up
-  const PARTIAL_SUCCESS_RATIO = 0.6; // breaking the streak past this fraction of the held
-                                      // duration (but before 100%) resets silently instead
-                                      // of flashing red — only a short-lived attempt fails.
+  const RESULT_FLASH_MS = 2500;   // how long the success full-screen flash stays up
 
   // The 12 notes of the chromatic scale in octave 4, expressed as semitone
   // offsets from A4 (440Hz) so the frequency follows the standard equal
@@ -70,12 +67,15 @@
     noteSelect.appendChild(opt);
   });
   let targetFreq = noteFreq(0);
+  let targetNoteLabel = NOTE_DEFS.find(n => n.n === 0).label;
   function updateNoteFreqLabel() {
     noteFreqLabel.textContent = targetFreq.toFixed(2) + ' Hz';
   }
   updateNoteFreqLabel();
   noteSelect.addEventListener('change', () => {
-    targetFreq = noteFreq(parseInt(noteSelect.value, 10));
+    const n = parseInt(noteSelect.value, 10);
+    targetFreq = noteFreq(n);
+    targetNoteLabel = NOTE_DEFS.find(note => note.n === n).label;
     updateNoteFreqLabel();
     resetTest();
   });
@@ -214,7 +214,7 @@
     ctx.clearRect(0, 0, W, H);
 
     const centerY = H * 0.5;
-    const rangeTop = H * 0.15;
+    const rangeTop = H * 0.26;
     const rangeSpan = centerY - rangeTop; // px per TOLERANCE_CENTS
     const barX = W * 0.4;
     const barWidth = Math.max(28, W * 0.14);
@@ -289,11 +289,20 @@
       ctx.restore();
     }
 
+    // Target note: large label so the singer always knows what to aim for.
+    ctx.textAlign = 'center';
+    ctx.font = '700 34px "Segoe UI", sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.fillText(targetNoteLabel, (barX + rulerX) / 2, rangeTop - 84);
+    ctx.font = '600 12px "Segoe UI", sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.fillText(`${targetFreq.toFixed(2)} Hz`, (barX + rulerX) / 2, rangeTop - 58);
+
     // Readout text: detected frequency / cents, or "sin señal".
     ctx.textAlign = 'center';
     ctx.font = '600 13px "Segoe UI", sans-serif';
     ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    const readoutY = rangeTop - 24;
+    const readoutY = rangeTop - 28;
     if (hasReading) {
       const sign = smoothedCents >= 0 ? '+' : '';
       ctx.fillText(`${sign}${smoothedCents.toFixed(0)} cents`, (barX + rulerX) / 2, readoutY);
@@ -330,17 +339,17 @@
       }
     }
 
-    // Result flash: full-screen pulse, white for success, red for fail.
-    if (testState === 'success' || testState === 'fail') {
+    // Result flash: full-screen white pulse on success.
+    if (testState === 'success') {
       const elapsed = RESULT_FLASH_MS - Math.max(0, testEndAt - now);
       const t = Math.max(0, Math.min(1, elapsed / RESULT_FLASH_MS));
       const alpha = Math.sin(t * Math.PI) * 0.7;
-      ctx.fillStyle = testState === 'success' ? `rgba(255,255,255,${alpha})` : `rgba(255,40,40,${alpha})`;
+      ctx.fillStyle = `rgba(255,255,255,${alpha})`;
       ctx.fillRect(0, 0, W, H);
       ctx.textAlign = 'center';
       ctx.font = '700 22px "Segoe UI", sans-serif';
-      ctx.fillStyle = testState === 'success' ? 'rgba(20,20,20,0.85)' : 'rgba(255,255,255,0.9)';
-      ctx.fillText(testState === 'success' ? '¡Nota afinada!' : 'Intento fallido', W / 2, H / 2);
+      ctx.fillStyle = 'rgba(20,20,20,0.85)';
+      ctx.fillText('¡Nota afinada!', W / 2, H / 2);
       ctx.textAlign = 'start';
     }
   }
@@ -442,12 +451,8 @@
           holdStreakStart = null;
         }
       } else if (holdStreakStart !== null) {
-        const heldMs = now - holdStreakStart;
-        const failThresholdMs = holdDurationMs * PARTIAL_SUCCESS_RATIO;
-        if (heldMs < failThresholdMs) {
-          testState = 'fail';
-          testEndAt = now + RESULT_FLASH_MS;
-        }
+        // Streak broken before reaching the required duration — just reset
+        // silently so the singer can try again, no fail state.
         holdStreakStart = null;
       }
     } else if (now >= testEndAt) {
