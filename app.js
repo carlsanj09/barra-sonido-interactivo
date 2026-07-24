@@ -146,6 +146,18 @@
   let running = false;
 
   async function startMic() {
+    // These two conditions produce the exact same "permission denied" style
+    // failure a browser gives for an actual user refusal, so they need to be
+    // told apart explicitly instead of falling into the generic catch below.
+    if (!window.isSecureContext) {
+      statusEl.textContent = 'El micrófono requiere HTTPS (o localhost). Abre el sitio publicado, no el archivo local.';
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      statusEl.textContent = 'Este navegador/contexto no expone getUserMedia (¿estás dentro de un iframe con permisos restringidos?).';
+      return;
+    }
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -164,7 +176,14 @@
       statusEl.textContent = 'Escuchando…';
       requestAnimationFrame(loop);
     } catch (err) {
-      statusEl.textContent = 'Permiso de micrófono denegado o no disponible.';
+      const reasons = {
+        NotAllowedError: 'Permiso denegado. Revisa el ícono de candado/micrófono en la barra de direcciones y permite el acceso para este sitio.',
+        NotFoundError: 'No se detectó ningún micrófono conectado.',
+        NotReadableError: 'El micrófono está siendo usado por otra aplicación y no se pudo abrir.',
+        SecurityError: 'El navegador bloqueó el acceso por política de seguridad (permisos restringidos en este contexto).',
+        AbortError: 'La solicitud de micrófono fue interrumpida. Intenta de nuevo.',
+      };
+      statusEl.textContent = reasons[err.name] || `Error al acceder al micrófono (${err.name}): ${err.message}`;
       console.error(err);
     }
   }
