@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Barra de Sonido Interactivo</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="stage" id="stage">
+    <div class="chroma-bg" id="chromaBg"></div>
+
+    <canvas id="smokeCanvas"></canvas>
+
+    <div class="bars" id="barsContainer"></div>
+
+    <div class="hud">
+      <button id="micBtn" class="hud-btn primary">🎤 Activar micrófono</button>
+      <div class="hud-status" id="status">Esperando permiso de micrófono…</div>
+    </div>
+
+    <div class="controls">
+      <div class="control-group">
+        <label for="bgColor">Fondo (chroma)</label>
+        <input type="color" id="bgColor" value="#00ff47" />
+        <button id="bgReset" class="mini-btn" title="Restablecer verde chroma">↺</button>
+      </div>
+      <div class="control-group">
+        <label for="barColor">Color de barra</label>
+        <input type="color" id="barColor" value="#ff2fd0" />
+        <button id="barReset" class="mini-btn" title="Restablecer color de barra">↺</button>
+      </div>
+      <div class="control-group slider-group">
+        <label for="sensitivity">Sensibilidad</label>
+        <input type="range" id="sensitivity" min="0.5" max="2.5" step="0.1" value="1.2" />
+      </div>
+      <button id="clearSmoke" class="mini-btn wide">Limpiar humo</button>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
