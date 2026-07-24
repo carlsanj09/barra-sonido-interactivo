@@ -1,0 +1,236 @@
+:root {
+  --chroma: #00ff47;
+  --bar-color: #ff2fd0;
+  --panel-bg: rgba(10, 10, 14, 0.55);
+  --panel-border: rgba(255, 255, 255, 0.14);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: #0b0b0f;
+  font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+.stage {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  max-width: calc(100dvh * 9 / 16);
+  max-height: calc(100vw * 16 / 9);
+  aspect-ratio: 9 / 16;
+  overflow: hidden;
+  background: #000;
+  box-shadow: 0 0 60px rgba(0, 0, 0, 0.6);
+}
+
+.chroma-bg {
+  position: absolute;
+  inset: 0;
+  background: var(--chroma);
+  transition: background-color 0.25s ease;
+  z-index: 0;
+}
+
+#smokeCanvas {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.bars {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 1.6%;
+  padding: 0 3%;
+  padding-bottom: 14%;
+}
+
+.bar {
+  position: relative;
+  flex: 1 1 0;
+  max-width: 22px;
+  min-height: 6px;
+  border-radius: 8px 8px 6px 6px;
+  background: linear-gradient(180deg, var(--bar-color) 0%, color-mix(in srgb, var(--bar-color) 55%, #000) 100%);
+  box-shadow:
+    inset 0 2px 3px rgba(255, 255, 255, 0.55),
+    inset 0 -3px 5px rgba(0, 0, 0, 0.45),
+    0 2px 6px rgba(0, 0, 0, 0.35),
+    0 0 10px color-mix(in srgb, var(--bar-color) 60%, transparent);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  transition: height 0.06s linear, box-shadow 0.12s ease;
+  will-change: height;
+}
+
+.bar.peak {
+  box-shadow:
+    inset 0 2px 3px rgba(255, 255, 255, 0.85),
+    inset 0 -3px 5px rgba(0, 0, 0, 0.5),
+    0 0 18px 4px color-mix(in srgb, var(--bar-color) 85%, #fff);
+}
+
+.hud {
+  position: absolute;
+  top: 4%;
+  left: 0;
+  right: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.hud-btn {
+  pointer-events: auto;
+  border: 1px solid var(--panel-border);
+  background: var(--panel-bg);
+  color: #fff;
+  backdrop-filter: blur(6px);
+  padding: 10px 18px;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s ease, background 0.2s ease;
+}
+
+.hud-btn:active {
+  transform: scale(0.96);
+}
+
+.hud-btn.primary.on {
+  background: color-mix(in srgb, var(--bar-color) 35%, rgba(10,10,14,0.55));
+  border-color: color-mix(in srgb, var(--bar-color) 70%, transparent);
+}
+
+.hud-status {
+  pointer-events: none;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 11px;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 4px 10px;
+  border-radius: 8px;
+}
+
+.controls {
+  position: absolute;
+  bottom: 3%;
+  left: 0;
+  right: 0;
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px 14px;
+  padding: 0 4%;
+}
+
+.control-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  backdrop-filter: blur(6px);
+  padding: 6px 10px;
+  border-radius: 12px;
+}
+
+.control-group label {
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.control-group input[type="color"] {
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  padding: 0;
+  background: none;
+  cursor: pointer;
+}
+
+.slider-group input[type="range"] {
+  width: 90px;
+}
+
+.mini-btn {
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  border-radius: 8px;
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.mini-btn.wide {
+  width: auto;
+  padding: 0 14px;
+  height: 34px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--panel-bg);
+  border-radius: 12px;
+}
+
+.toggle-controls-btn {
+  position: absolute;
+  bottom: 10%;
+  right: 4%;
+  z-index: 4;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--panel-border);
+  background: var(--panel-bg);
+  color: #fff;
+  font-size: 15px;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.toggle-controls-btn.active {
+  background: color-mix(in srgb, var(--bar-color) 40%, rgba(10, 10, 14, 0.55));
+  transform: rotate(90deg);
+}
+
+.controls.hidden {
+  display: none;
+}
+
+.controls {
+  transition: opacity 0.2s ease;
+}
