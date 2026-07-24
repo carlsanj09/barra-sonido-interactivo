@@ -1,20 +1,38 @@
 (() => {
-  const PEAK_COOLDOWN_MS = 90;   // min time between smoke bursts per chimney
-  const SMOKE_LIFE_MS = 9000;    // how long a smoke particle lingers before fully fading
-  const TONE_FREQ_HZ = 440;      // A4 — smoke turns gold while this pitch is present
+  // ---------- Tunable constants ----------
+  const TOLERANCE_CENTS = 50;     // full scale of the ruler, ±50 cents (half a semitone)
+  const IN_TUNE_CENTS = 10;       // within this many cents counts as "hit" -> bar changes color
+  const RMS_GATE_BASE = 0.02;     // base minimum input level to attempt pitch detection
+  const CLARITY_GATE = 0.5;       // minimum autocorrelation clarity to trust a pitch reading
+  const MIN_FREQ = 70;            // lowest voice frequency we try to track (Hz)
+  const MAX_FREQ = 1200;          // highest voice frequency we try to track (Hz)
+  const RESULT_FLASH_MS = 2500;   // how long the success/fail full-screen flash stays up
+  const PARTIAL_SUCCESS_RATIO = 0.6; // breaking the streak past this fraction of the held
+                                      // duration (but before 100%) resets silently instead
+                                      // of flashing red — only a short-lived attempt fails.
 
-  // Three fixed frequency bands, left to right: bass, mids, treble. Each one
-  // drives its own chimney, so the bar itself doubles as an EQ readout.
-  const BAND_DEFS = [
-    { key: 'bass', label: 'Graves', loHz: 20, hiHz: 250 },
-    { key: 'mid', label: 'Medios', loHz: 250, hiHz: 4000 },
-    { key: 'treble', label: 'Brillos', loHz: 4000, hiHz: 16000 },
+  // The 12 notes of the chromatic scale in octave 4, expressed as semitone
+  // offsets from A4 (440Hz) so the frequency follows the standard equal
+  // temperament formula: freq = 440 * 2^(n/12).
+  const NOTE_DEFS = [
+    { label: 'Do', n: -9 },
+    { label: 'Do#', n: -8 },
+    { label: 'Re', n: -7 },
+    { label: 'Re#', n: -6 },
+    { label: 'Mi', n: -5 },
+    { label: 'Fa', n: -4 },
+    { label: 'Fa#', n: -3 },
+    { label: 'Sol', n: -2 },
+    { label: 'Sol#', n: -1 },
+    { label: 'La', n: 0 },
+    { label: 'La#', n: 1 },
+    { label: 'Si', n: 2 },
   ];
+  const noteFreq = (n) => 440 * Math.pow(2, n / 12);
 
   const stage = document.getElementById('stage');
   const chromaBg = document.getElementById('chromaBg');
-  const barsContainer = document.getElementById('barsContainer');
-  const canvas = document.getElementById('smokeCanvas');
+  const canvas = document.getElementById('tunerCanvas');
   const ctx = canvas.getContext('2d');
   const micBtn = document.getElementById('micBtn');
   const statusEl = document.getElementById('status');
@@ -23,26 +41,42 @@
   const bgResetBtn = document.getElementById('bgReset');
   const barResetBtn = document.getElementById('barReset');
   const sensitivityInput = document.getElementById('sensitivity');
-  const clearSmokeBtn = document.getElementById('clearSmoke');
-  const thresholdInput = document.getElementById('threshold');
-  const thresholdValueLabel = document.getElementById('thresholdValue');
+  const noteSelect = document.getElementById('noteSelect');
+  const noteFreqLabel = document.getElementById('noteFreqLabel');
+  const holdDurationInput = document.getElementById('holdDuration');
+  const holdDurationValueLabel = document.getElementById('holdDurationValue');
+  const resetTestBtn = document.getElementById('resetTest');
   const toggleControlsBtn = document.getElementById('toggleControls');
   const controlsPanel = document.getElementById('controlsPanel');
 
   const DEFAULT_BG = '#00ff47';
   const DEFAULT_BAR = '#ff2fd0';
 
-  // ---------- Bars (one chimney per frequency band) ----------
-  const bars = BAND_DEFS.map((band) => {
-    const el = document.createElement('div');
-    el.className = 'bar';
-    el.dataset.band = band.key;
-    const label = document.createElement('span');
-    label.className = 'bar-label';
-    label.textContent = band.label;
-    el.appendChild(label);
-    barsContainer.appendChild(el);
-    return { el, loHz: band.loHz, hiHz: band.hiHz, lastPeakAt: 0, aboveThreshold: false };
+  // ---------- Note selector ----------
+  NOTE_DEFS.forEach((note, i) => {
+    const opt = document.createElement('option');
+    opt.value = note.n;
+    opt.textContent = note.label;
+    if (note.n === 0) opt.selected = true; // default to La (A4, 440Hz)
+    noteSelect.appendChild(opt);
+  });
+  let targetFreq = noteFreq(0);
+  function updateNoteFreqLabel() {
+    noteFreqLabel.textContent = targetFreq.toFixed(2) + ' Hz';
+  }
+  updateNoteFreqLabel();
+  noteSelect.addEventListener('change', () => {
+    targetFreq = noteFreq(parseInt(noteSelect.value, 10));
+    updateNoteFreqLabel();
+    resetTest();
+  });
+
+  // ---------- Hold duration ----------
+  let holdDurationMs = parseFloat(holdDurationInput.value) * 1000;
+  holdDurationInput.addEventListener('input', () => {
+    holdDurationValueLabel.textContent = holdDurationInput.value;
+    holdDurationMs = parseFloat(holdDurationInput.value) * 1000;
+    resetTest();
   });
 
   // ---------- Canvas sizing ----------
@@ -58,94 +92,26 @@
   window.addEventListener('resize', resizeCanvas);
   resizeCanvas();
 
-  // ---------- Particles (smoke) ----------
-  // Each particle spirals around a "guide" point that rises from its own
-  // chimney and drifts toward screen center over its lifetime, so smoke from
-  // all three bars converges and overlaps in the middle into one abstract
-  // shape instead of three separate columns.
-  let particles = [];
+  // ---------- Test state ----------
+  // 'idle' -> tracking live pitch; 'success'/'fail' -> showing the result
+  // flash, frozen until it auto-clears (or the user hits reset).
+  let testState = 'idle';
+  let testEndAt = null;
+  let holdStreakStart = null;
+  let smoothedCents = 0;
+  let hasReading = false;
 
-  function spawnSmoke(x, y, intensity, centerX) {
-    const count = 1 + Math.round(intensity * 4);
-    for (let i = 0; i < count; i++) {
-      particles.push({
-        originX: x + (Math.random() - 0.5) * 14,
-        originY: y,
-        centerX: centerX + (Math.random() - 0.5) * 60,
-        born: performance.now(),
-        life: SMOKE_LIFE_MS * (0.7 + Math.random() * 0.6),
-        riseSpeed: (0.018 + Math.random() * 0.02) * (0.6 + intensity), // px/ms
-        spiralAngle: Math.random() * Math.PI * 2,
-        spiralSpeed: (0.0008 + Math.random() * 0.0014) * (Math.random() < 0.5 ? 1 : -1), // rad/ms
-        spiralRadiusMax: 16 + Math.random() * 30 * (0.5 + intensity),
-        radius: 5 + Math.random() * 6 * (0.5 + intensity),
-        maxRadius: 16 + Math.random() * 24 * (0.5 + intensity),
-      });
-    }
-    // safety cap so very long sessions don't blow memory
-    if (particles.length > 1400) {
-      particles.splice(0, particles.length - 1400);
-    }
+  function resetTest() {
+    testState = 'idle';
+    testEndAt = null;
+    holdStreakStart = null;
   }
-
-  function drawSmoke(now, tone440Active) {
-    const rect = stage.getBoundingClientRect();
-    ctx.clearRect(0, 0, rect.width, rect.height);
-    ctx.globalCompositeOperation = 'source-over';
-
-    particles = particles.filter(p => (now - p.born) < p.life);
-
-    // While the 440Hz tone (A4) is present, every particle on screen — new
-    // or already floating — renders in gold instead of the usual grey smoke.
-    const core = tone440Active ? '255,214,64' : '235,235,240';
-    const mid = tone440Active ? '255,178,20' : '200,200,210';
-
-    for (const p of particles) {
-      const t = (now - p.born) / p.life; // 0..1
-      const elapsed = now - p.born;
-      const ease = 1 - Math.pow(1 - t, 2);
-
-      // Guide point: rises straight up from the chimney, pulled toward the
-      // shared center with an ease-in curve so convergence happens late.
-      const attraction = t * t;
-      const guideX = p.originX + (p.centerX - p.originX) * attraction;
-      const guideY = p.originY - p.riseSpeed * elapsed;
-
-      // Spiral radius grows then shrinks back to ~0 (sin envelope), so each
-      // particle winds outward and then coils back in as it vanishes.
-      const spiralR = p.spiralRadiusMax * Math.sin(Math.PI * t);
-      const angle = p.spiralAngle + p.spiralSpeed * elapsed;
-      const x = guideX + Math.cos(angle) * spiralR;
-      const y = guideY + Math.sin(angle) * spiralR * 0.6;
-
-      const radius = p.radius + (p.maxRadius - p.radius) * ease;
-      const opacity = (1 - t) * 0.5;
-
-      const grad = ctx.createRadialGradient(x, y, 0, x, y, radius);
-      grad.addColorStop(0, `rgba(${core},${opacity})`);
-      grad.addColorStop(0.5, `rgba(${mid},${opacity * 0.6})`);
-      grad.addColorStop(1, `rgba(${mid},0)`);
-
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(x, y, radius, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  clearSmokeBtn.addEventListener('click', () => {
-    particles = [];
-  });
+  resetTestBtn.addEventListener('click', resetTest);
 
   // ---------- Controls visibility toggle ----------
   toggleControlsBtn.addEventListener('click', () => {
     const hidden = controlsPanel.classList.toggle('hidden');
     toggleControlsBtn.classList.toggle('active', !hidden);
-  });
-
-  // ---------- Threshold display ----------
-  thresholdInput.addEventListener('input', () => {
-    thresholdValueLabel.textContent = thresholdInput.value;
   });
 
   // ---------- Colors ----------
@@ -170,14 +136,210 @@
   applyBg(DEFAULT_BG);
   applyBarColor(DEFAULT_BAR);
 
+  // ---------- Pitch detection (autocorrelation over the plausible voice range) ----------
+  // Plain "pick the global max correlation" autocorrelation is octave-
+  // ambiguous: for a periodic signal, correlation at 2x/3x the true period is
+  // nearly as strong as at the true period, and tiny numerical noise decides
+  // which one wins. The fix is to only consider actual local peaks in the
+  // correlation curve, then take the smallest-lag peak that's close to the
+  // global best — that's the fundamental, not a sub-harmonic of it.
+  const PEAK_RATIO = 0.9;
+
+  function detectPitch(buf, sampleRate, rmsGate) {
+    const SIZE = buf.length;
+    let rms = 0;
+    for (let i = 0; i < SIZE; i++) rms += buf[i] * buf[i];
+    rms = Math.sqrt(rms / SIZE);
+    if (rms < rmsGate) return null;
+
+    const minLag = Math.floor(sampleRate / MAX_FREQ);
+    const maxLag = Math.min(SIZE - 2, Math.ceil(sampleRate / MIN_FREQ));
+
+    const corrs = new Float64Array(maxLag + 2);
+    for (let lag = minLag; lag <= maxLag; lag++) {
+      let c = 0;
+      const n = SIZE - lag;
+      for (let i = 0; i < n; i++) c += buf[i] * buf[i + lag];
+      corrs[lag] = c / n;
+    }
+
+    let globalMax = 0;
+    for (let lag = minLag; lag <= maxLag; lag++) {
+      if (corrs[lag] > globalMax) globalMax = corrs[lag];
+    }
+    if (globalMax <= 0) return null;
+
+    let bestLag = -1;
+    for (let lag = minLag + 1; lag < maxLag; lag++) {
+      const isPeak = corrs[lag] >= corrs[lag - 1] && corrs[lag] >= corrs[lag + 1];
+      if (isPeak && corrs[lag] >= globalMax * PEAK_RATIO) {
+        bestLag = lag;
+        break;
+      }
+    }
+    if (bestLag <= 0) return null;
+
+    let energy = 0;
+    for (let i = 0; i < SIZE; i++) energy += buf[i] * buf[i];
+    energy /= SIZE;
+    const clarity = corrs[bestLag] / (energy || 1e-9);
+    if (clarity < CLARITY_GATE) return null;
+
+    // Parabolic interpolation around the best lag for sub-sample precision.
+    const c0 = corrs[bestLag - 1];
+    const c1 = corrs[bestLag];
+    const c2 = corrs[bestLag + 1];
+    const denom = c0 - 2 * c1 + c2;
+    const shift = denom ? 0.5 * (c0 - c2) / denom : 0;
+    const refinedLag = bestLag + Math.max(-1, Math.min(1, shift));
+
+    return sampleRate / refinedLag;
+  }
+
+  // ---------- Drawing ----------
+  function draw(now) {
+    const rect = stage.getBoundingClientRect();
+    const W = rect.width;
+    const H = rect.height;
+    ctx.clearRect(0, 0, W, H);
+
+    const centerY = H * 0.5;
+    const rangeTop = H * 0.15;
+    const rangeSpan = centerY - rangeTop; // px per TOLERANCE_CENTS
+    const barX = W * 0.4;
+    const barWidth = Math.max(28, W * 0.14);
+    const rulerX = W * 0.62;
+
+    const inTune = hasReading && Math.abs(smoothedCents) <= IN_TUNE_CENTS;
+    const barColor = getComputedStyle(document.documentElement).getPropertyValue('--bar-color').trim() || DEFAULT_BAR;
+    const successColor = '#ffd93d';
+
+    // Ruler: ticks every 10 cents, numbered, 0 in the middle.
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.font = '600 12px "Segoe UI", sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = 2;
+    for (let v = -TOLERANCE_CENTS; v <= TOLERANCE_CENTS; v += 10) {
+      const y = centerY - (v / TOLERANCE_CENTS) * rangeSpan;
+      const tickLen = v === 0 ? 22 : 12;
+      ctx.beginPath();
+      ctx.moveTo(rulerX, y);
+      ctx.lineTo(rulerX + tickLen, y);
+      ctx.stroke();
+      const label = v > 0 ? `+${v}` : `${v}`;
+      ctx.fillText(label, rulerX + tickLen + 6, y);
+    }
+    // Vertical spine of the ruler.
+    ctx.beginPath();
+    ctx.moveTo(rulerX, rangeTop);
+    ctx.lineTo(rulerX, centerY + rangeSpan);
+    ctx.stroke();
+
+    // Center dashed guide line spanning bar + ruler.
+    ctx.save();
+    ctx.setLineDash([4, 6]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.beginPath();
+    ctx.moveTo(barX - barWidth * 0.6, centerY);
+    ctx.lineTo(rulerX, centerY);
+    ctx.stroke();
+    ctx.restore();
+
+    // The bar itself: grows up from center when sharp, down when flat. A
+    // minimum thickness is enforced so a dead-on match (deviation ~0) still
+    // renders as a visible marker instead of shrinking to nothing.
+    const displayCents = Math.max(-TOLERANCE_CENTS, Math.min(TOLERANCE_CENTS, hasReading ? smoothedCents : 0));
+    let signedHeight = (displayCents / TOLERANCE_CENTS) * rangeSpan;
+    const MIN_BAR_HEIGHT = 10;
+    if (Math.abs(signedHeight) < MIN_BAR_HEIGHT) {
+      signedHeight = signedHeight >= 0 ? MIN_BAR_HEIGHT : -MIN_BAR_HEIGHT;
+    }
+    const top = signedHeight >= 0 ? centerY - signedHeight : centerY;
+    const height = Math.abs(signedHeight);
+    const fillColor = inTune ? successColor : barColor;
+    const grad = ctx.createLinearGradient(0, top, 0, top + height);
+    grad.addColorStop(0, fillColor);
+    grad.addColorStop(1, `color-mix(in srgb, ${fillColor} 55%, #000)`);
+    ctx.fillStyle = grad;
+    const radius = Math.min(10, barWidth / 2);
+    ctx.beginPath();
+    ctx.roundRect(barX - barWidth / 2, top, barWidth, height, radius);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    if (inTune) {
+      ctx.save();
+      ctx.shadowColor = successColor;
+      ctx.shadowBlur = 22;
+      ctx.beginPath();
+      ctx.roundRect(barX - barWidth / 2, top, barWidth, height, radius);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Readout text: detected frequency / cents, or "sin señal".
+    ctx.textAlign = 'center';
+    ctx.font = '600 13px "Segoe UI", sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    const readoutY = rangeTop - 24;
+    if (hasReading) {
+      const sign = smoothedCents >= 0 ? '+' : '';
+      ctx.fillText(`${sign}${smoothedCents.toFixed(0)} cents`, (barX + rulerX) / 2, readoutY);
+    } else {
+      ctx.fillText('Sin señal — canta o silba la nota', (barX + rulerX) / 2, readoutY);
+    }
+    ctx.textAlign = 'start';
+
+    // Ripple effect: only while a hold streak is active, intensifying from
+    // faint/slow at 1s up to fast/dense right before the required duration.
+    if (holdStreakStart !== null) {
+      const heldMs = now - holdStreakStart;
+      const rampStart = 1000;
+      if (heldMs >= rampStart) {
+        const progress = Math.max(0, Math.min(1, (heldMs - rampStart) / Math.max(1, holdDurationMs - rampStart)));
+        const ringCount = 1 + Math.floor(progress * 5);
+        const period = 1400 - progress * 900;
+        const maxRadius = Math.min(W, H) * 0.42;
+        const cx = W / 2;
+        const cy = H / 2;
+        ctx.save();
+        for (let i = 0; i < ringCount; i++) {
+          const phase = ((now / period) + i / ringCount) % 1;
+          const jitter = Math.sin(now * 0.02 + i * 2) * progress * 6;
+          const r = phase * maxRadius + jitter;
+          const alpha = (1 - phase) * (0.15 + progress * 0.35);
+          ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
+          ctx.lineWidth = 2 + progress * 2;
+          ctx.beginPath();
+          ctx.arc(cx, cy, Math.max(0, r), 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    }
+
+    // Result flash: full-screen pulse, white for success, red for fail.
+    if (testState === 'success' || testState === 'fail') {
+      const elapsed = RESULT_FLASH_MS - Math.max(0, testEndAt - now);
+      const t = Math.max(0, Math.min(1, elapsed / RESULT_FLASH_MS));
+      const alpha = Math.sin(t * Math.PI) * 0.7;
+      ctx.fillStyle = testState === 'success' ? `rgba(255,255,255,${alpha})` : `rgba(255,40,40,${alpha})`;
+      ctx.fillRect(0, 0, W, H);
+      ctx.textAlign = 'center';
+      ctx.font = '700 22px "Segoe UI", sans-serif';
+      ctx.fillStyle = testState === 'success' ? 'rgba(20,20,20,0.85)' : 'rgba(255,255,255,0.9)';
+      ctx.fillText(testState === 'success' ? '¡Nota afinada!' : 'Intento fallido', W / 2, H / 2);
+      ctx.textAlign = 'start';
+    }
+  }
+
   // ---------- Audio ----------
-  let audioCtx, analyser, dataArray, source;
+  let audioCtx, analyser, timeBuf, source;
   let running = false;
 
   async function startMic() {
-    // These two conditions produce the exact same "permission denied" style
-    // failure a browser gives for an actual user refusal, so they need to be
-    // told apart explicitly instead of falling into the generic catch below.
     if (!window.isSecureContext) {
       statusEl.textContent = 'El micrófono requiere HTTPS (o localhost). Abre el sitio publicado, no el archivo local.';
       return;
@@ -191,14 +353,8 @@
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       analyser = audioCtx.createAnalyser();
-      // Larger fftSize gives finer frequency resolution — needed both to
-      // isolate 440Hz specifically and to separate bass/mid/treble bands
-      // cleanly — without noticeably increasing CPU cost.
-      analyser.fftSize = 4096;
-      analyser.smoothingTimeConstant = 0.75;
-      analyser.minDecibels = -90;
-      analyser.maxDecibels = -10;
-      dataArray = new Uint8Array(analyser.frequencyBinCount);
+      analyser.fftSize = 2048;
+      timeBuf = new Float32Array(analyser.fftSize);
       source = audioCtx.createMediaStreamSource(stream);
       source.connect(analyser);
 
@@ -206,6 +362,7 @@
       micBtn.textContent = '⏸ Detener micrófono';
       micBtn.classList.add('on');
       statusEl.textContent = 'Escuchando…';
+      resetTest();
       requestAnimationFrame(loop);
     } catch (err) {
       const reasons = {
@@ -227,7 +384,8 @@
     micBtn.textContent = '🎤 Activar micrófono';
     micBtn.classList.remove('on');
     statusEl.textContent = 'Micrófono detenido.';
-    bars.forEach(b => (b.el.style.height = '3%'));
+    hasReading = false;
+    resetTest();
   }
 
   micBtn.addEventListener('click', () => {
@@ -237,78 +395,54 @@
 
   function loop() {
     if (!running) return;
-    analyser.getByteFrequencyData(dataArray);
+    analyser.getFloatTimeDomainData(timeBuf);
 
     const sensitivity = parseFloat(sensitivityInput.value);
-    const thresholdDb = parseFloat(thresholdInput.value);
-    const minDb = analyser.minDecibels;
-    const maxDb = analyser.maxDecibels;
-    const dbRange = maxDb - minDb;
-    const binCount = dataArray.length;
-    const binHz = audioCtx.sampleRate / analyser.fftSize;
+    const rmsGate = RMS_GATE_BASE / sensitivity;
     const now = performance.now();
-    const stageRect = stage.getBoundingClientRect();
-    const centerX = stageRect.width / 2;
 
-    for (const bar of bars) {
-      const loBin = Math.max(0, Math.floor(bar.loHz / binHz));
-      const hiBin = Math.min(binCount - 1, Math.ceil(bar.hiHz / binHz));
-      let sum = 0;
-      let n = 0;
-      for (let k = loBin; k <= hiBin; k++) {
-        sum += dataArray[k];
-        n++;
-      }
-      const avg = n ? sum / n : 0; // 0..255
-
-      const boosted = Math.min(255, avg * sensitivity);
-      const heightPct = Math.max(3, (boosted / 255) * 100);
-      bar.el.style.height = heightPct + '%';
-
-      // Convert the raw amplitude to an approximate dB value using the
-      // analyser's own scale, so the threshold the user picks means
-      // something real (matches AnalyserNode.min/maxDecibels).
-      const dbValue = minDb + (avg / 255) * dbRange;
-      const isAbove = dbValue >= thresholdDb;
-
-      // Smoke fires on the rising edge only (silence -> above threshold),
-      // so bursts land on each transient/beat instead of a sustained cloud
-      // while the sound stays loud — this is what keeps it "rhythmic".
-      if (isAbove && !bar.aboveThreshold && now - bar.lastPeakAt > PEAK_COOLDOWN_MS) {
-        bar.lastPeakAt = now;
-        const barRect = bar.el.getBoundingClientRect();
-        const x = barRect.left - stageRect.left + barRect.width / 2;
-        const y = barRect.top - stageRect.top;
-        const intensity = Math.min(1, Math.max(0, (dbValue - thresholdDb) / (maxDb - thresholdDb || 1)));
-        spawnSmoke(x, y, intensity, centerX);
-      }
-      bar.aboveThreshold = isAbove;
-      bar.el.classList.toggle('peak', isAbove);
+    const pitch = detectPitch(timeBuf, audioCtx.sampleRate, rmsGate);
+    if (pitch) {
+      const cents = 1200 * Math.log2(pitch / targetFreq);
+      smoothedCents = hasReading ? smoothedCents + (cents - smoothedCents) * 0.35 : cents;
+      hasReading = true;
+    } else {
+      hasReading = false;
     }
 
-    // Isolate the bin(s) nearest 440Hz to detect that specific pitch,
-    // independent of which band bucket it falls into.
-    const targetBin = Math.round(TONE_FREQ_HZ / binHz);
-    let toneSum = 0;
-    let toneBins = 0;
-    for (let k = targetBin - 1; k <= targetBin + 1; k++) {
-      if (k >= 0 && k < binCount) {
-        toneSum += dataArray[k];
-        toneBins++;
-      }
-    }
-    const toneAvg = toneBins ? toneSum / toneBins : 0;
-    const toneDb = minDb + (toneAvg / 255) * dbRange;
-    const tone440Active = toneDb >= thresholdDb;
+    const inTune = hasReading && Math.abs(smoothedCents) <= IN_TUNE_CENTS;
 
-    drawSmoke(now, tone440Active);
+    if (testState === 'idle') {
+      if (inTune) {
+        if (holdStreakStart === null) holdStreakStart = now;
+        const heldMs = now - holdStreakStart;
+        if (heldMs >= holdDurationMs) {
+          testState = 'success';
+          testEndAt = now + RESULT_FLASH_MS;
+          holdStreakStart = null;
+        }
+      } else if (holdStreakStart !== null) {
+        const heldMs = now - holdStreakStart;
+        const failThresholdMs = holdDurationMs * PARTIAL_SUCCESS_RATIO;
+        if (heldMs < failThresholdMs) {
+          testState = 'fail';
+          testEndAt = now + RESULT_FLASH_MS;
+        }
+        holdStreakStart = null;
+      }
+    } else if (now >= testEndAt) {
+      testState = 'idle';
+      testEndAt = null;
+    }
+
+    draw(now);
     requestAnimationFrame(loop);
   }
 
-  // Keep drawing smoke fade-out even when mic is stopped, so particles finish gracefully.
+  // Keep the ruler/bar visible (idle readout) even before the mic starts.
   function idleDraw() {
     if (!running) {
-      drawSmoke(performance.now(), false);
+      draw(performance.now());
     }
     requestAnimationFrame(idleDraw);
   }
